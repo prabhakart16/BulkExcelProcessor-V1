@@ -1,6 +1,8 @@
 using BulkExcelProcessor.Data;
 using BulkExcelProcessor.Models;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using System.Data;
 
 namespace BulkExcelProcessor.Repositories;
 
@@ -8,11 +10,13 @@ public class DataRepository : IDataRepository
 {
     private readonly AppDbContext _db;
     private readonly ILogger<DataRepository> _logger;
+    private readonly IConfiguration config;
 
-    public DataRepository(AppDbContext db, ILogger<DataRepository> logger)
+    public DataRepository(AppDbContext db, ILogger<DataRepository> logger,IConfiguration config)
     {
         _db = db;
         _logger = logger;
+        this.config = config;
     }
 
     public async Task<Guid> CreateOrGetBatchAsync(string fileName, int totalChunks)
@@ -78,12 +82,12 @@ public class DataRepository : IDataRepository
         await _db.SaveChangesAsync();
     }
 
-    public async Task<IEnumerable<BatchChunk>> GetPendingChunksAsync(Guid batchId)
+    public  List<BatchChunk> GetPendingChunksAsync(Guid batchId)
     {
-        return await _db.BatchChunks
+        return  _db.BatchChunks
             .Where(c => c.BatchId == batchId && !c.IsCompleted)
             .OrderBy(c => c.ChunkNumber)
-            .ToListAsync();
+            .ToList();
     }
 
     public async Task MarkChunkProcessedAsync(Guid chunkId)
@@ -121,4 +125,53 @@ public class DataRepository : IDataRepository
         _db.Batches.Update(batch);
         await _db.SaveChangesAsync();
     }
+
+    public async Task BulkInsertInvestorNotificationsAsync(IEnumerable<InvestorNotification> notifications)
+    {
+        var dataTable = new DataTable();
+        dataTable.Columns.Add("ID", typeof(Guid));
+        dataTable.Columns.Add("BatchId", typeof(Guid));
+        dataTable.Columns.Add("ChunkNumber", typeof(int));
+        dataTable.Columns.Add("LoanNumber", typeof(string));
+        dataTable.Columns.Add("LetterId", typeof(string));
+        dataTable.Columns.Add("OldInvNum", typeof(string));
+        dataTable.Columns.Add("NewInvNum", typeof(string));
+        dataTable.Columns.Add("CreatedDate", typeof(DateTime));
+
+        foreach (var n in notifications)
+        {
+            dataTable.Rows.Add(
+                n.ID,
+                n.BatchId,
+                n.ChunkNumber,
+                n.LoanNumber ?? (object)DBNull.Value,
+                n.LetterId ?? (object)DBNull.Value,
+                n.OldInvNum ?? (object)DBNull.Value,
+                n.NewInvNum ?? (object)DBNull.Value,
+                n.CreatedDate
+            );
+        }
+
+        using var connection = new SqlConnection(config.GetConnectionString("DefaultConnection"));
+        await connection.OpenAsync();
+
+        using var bulkCopy = new SqlBulkCopy(connection)
+        {
+            DestinationTableName = "InvestorNotification",
+            BatchSize = 1000, // adjust as needed
+            BulkCopyTimeout = 120
+        };
+
+        bulkCopy.ColumnMappings.Add("ID", "ID");
+        bulkCopy.ColumnMappings.Add("BatchId", "BatchId");
+        bulkCopy.ColumnMappings.Add("ChunkNumber", "ChunkNumber");
+        bulkCopy.ColumnMappings.Add("LoanNumber", "LoanNumber");
+        bulkCopy.ColumnMappings.Add("LetterId", "LetterId");
+        bulkCopy.ColumnMappings.Add("OldInvNum", "OldInvNum");
+        bulkCopy.ColumnMappings.Add("NewInvNum", "NewInvNum");
+        bulkCopy.ColumnMappings.Add("CreatedDate", "CreatedDate");
+
+        await bulkCopy.WriteToServerAsync(dataTable);
+    }
+
 }
